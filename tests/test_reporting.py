@@ -27,7 +27,8 @@ def test_stream_panel_preserves_long_output() -> None:
     console = Console(record=True, width=100, height=60)
 
     console.print(reporting.live_dashboard(
-        "model", "llama.cpp", 1, 4096, 8192, "reasoning", output, True, sample, 0.1, 20
+        "model", "llama.cpp", "Tesla T4", 1, 8192, 100, 30, 8092,
+        "reasoning", output, True, sample, 0.1, 20
     ))
 
     rendered = console.export_text()
@@ -37,6 +38,9 @@ def test_stream_panel_preserves_long_output() -> None:
     assert rendered.index("Reasoning tokens") < rendered.index("Response tokens") < rendered.index("Inference")
     assert "generated-line-00" in rendered
     assert "generated-line-29" in rendered
+    assert "Max context window" in rendered
+    assert "Input tokens" in rendered
+    assert "Max output tokens" in rendered
 
 
 def test_append_csv_preserves_old_rows_when_schema_grows(tmp_path, monkeypatch) -> None:

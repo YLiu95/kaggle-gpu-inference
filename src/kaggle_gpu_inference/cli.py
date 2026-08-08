@@ -15,7 +15,8 @@ from rich.live import Live
 
 from .config import HOME, ensure_dirs, read_state
 from .engines import ENGINE_NAMES, SPEC_TYPES, clear_server, ensure_server, server_matches, stream_completion, token_count
-from .models import context_estimates, estimated_model_size_bytes, load_gguf_config, load_hf_config, parse_model_ref, resolve_model
+from .hardware import Accelerator, detect_accelerator
+from .models import context_estimate, estimated_model_size_bytes, load_gguf_config, load_hf_config, parse_model_ref, resolve_model
 from .monitor import HardwareMonitor, aggregate_samples
 from .reporting import append_csv, final_summary, live_dashboard
 
@@ -57,9 +58,29 @@ def spec_draft_count(value: str) -> int:
     return count
 
 
-def setup_engine(engine: str) -> None:
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("expected a positive integer")
+    return number
+
+
+def calculate_token_budget(context: int, input_tokens: int, requested: int | None) -> int:
+    available = context - input_tokens
+    if available < 1:
+        raise RuntimeError(
+            f"Input uses {input_tokens:,} tokens, which does not leave room in the "
+            f"{context:,}-token context window."
+        )
+    return min(available, requested) if requested is not None else available
+
+
+def setup_engine(engine: str, force_tpu: bool = False) -> None:
     ensure_dirs()
+    accelerator = detect_accelerator(force_tpu)
     if engine == "llama.cpp":
+        if accelerator.kind != "gpu":
+            raise RuntimeError("llama.cpp setup requires a GPU; use vllm or sglang on TPU")
         source = HOME / "vendor/llama.cpp"
         if not source.exists():
             source.parent.mkdir(parents=True, exist_ok=True)
@@ -77,36 +98,42 @@ def setup_engine(engine: str) -> None:
         )
         subprocess.run(["cmake", "--build", str(source / "build"), "--target", "llama-server", "-j", "2"], check=True)
     else:
-        package = "vllm" if engine == "vllm" else "sglang[all]"
+        if accelerator.kind == "tpu":
+            minimum = (3, 11) if engine == "vllm" else (3, 12)
+            if sys.version_info < minimum:
+                required = ".".join(str(value) for value in minimum)
+                raise RuntimeError(f"{engine} TPU setup requires Python {required} or newer")
+            package = "vllm-tpu" if engine == "vllm" else "sglang-jax[tpu]"
+        else:
+            package = "vllm" if engine == "vllm" else "sglang[all]"
         subprocess.run([sys.executable, "-m", "pip", "install", package], check=True)
 
 
 def command_run(args: argparse.Namespace) -> None:
+    detected = detect_accelerator(args.tpu)
+    if detected.kind == "cpu":
+        raise RuntimeError("No GPU or TPU was detected")
+    if args.tpu and detected.kind != "tpu":
+        raise RuntimeError("--tpu was requested, but no TPU was detected")
+    devices = args.gpus or detected.device_count
+    if devices > detected.device_count:
+        raise RuntimeError(
+            f"Requested {devices} devices, but only {detected.device_count} {detected.kind.upper()} "
+            "devices were detected"
+        )
+    accelerator = Accelerator(
+        detected.kind, detected.name, devices, detected.memory_per_device_bytes
+    )
+    if accelerator.kind == "tpu" and args.engine == "llama.cpp":
+        raise ValueError("llama.cpp does not support TPU; select --engine vllm or --engine sglang")
     if args.engine != "llama.cpp" and args.spec_type != "none":
         raise ValueError("--spec-type is currently supported only by the llama.cpp engine")
     ref = parse_model_ref(args.model, args.filename)
-    current = read_state()
-    requested_signature = (
-        ref.source, args.engine, args.gpus, args.context, args.spec_type, args.spec_draft_n_max
-    )
-    current_signature = (
-        current.get("source"), current.get("engine"), current.get("gpus"), current.get("context"),
-        current.get("spec_type", "none"), current.get("spec_draft_n_max", 2),
-    )
-    if current and requested_signature != current_signature:
-        clear_server()
     model = resolve_model(ref, args.engine)
-    reusable = server_matches(
-        args.engine, model, ref.source, args.gpus, args.context,
-        args.spec_type, args.spec_draft_n_max,
-    )
-    if current and requested_signature == current_signature and not reusable:
-        clear_server()
-    monitor = HardwareMonitor(args.gpus)
+    monitor = HardwareMonitor(accelerator)
     initial = monitor.sample()
     model_bytes = estimated_model_size_bytes(ref, model)
     config = {**load_hf_config(ref), **{key: value for key, value in load_gguf_config(model).items() if value}}
-    per_gpu_vram = int(initial.vram_total_gb * 1e9 / max(1, args.gpus))
     mtp_gpu_headroom = MTP_GPU_HEADROOM_BYTES if args.spec_type == "draft-mtp" else 0
     mtp_ram_headroom = MTP_RAM_HEADROOM_BYTES if args.spec_type == "draft-mtp" else 0
     mtp_kv_headroom = (
@@ -115,32 +142,60 @@ def command_run(args: argparse.Namespace) -> None:
     )
     gpu_capacity_bytes = model_bytes + mtp_gpu_headroom
     ram_capacity_bytes = model_bytes + mtp_ram_headroom
-    context_1, context_2 = context_estimates(model_bytes + mtp_kv_headroom, config, per_gpu_vram)
-    selected_context = context_1 if args.gpus == 1 else context_2
+    max_context = context_estimate(
+        model_bytes + mtp_kv_headroom,
+        config,
+        accelerator.memory_per_device_bytes,
+        accelerator.device_count,
+        memory_utilization=0.80 if accelerator.kind == "tpu" else 0.90,
+    )
+    selected_context = args.context or max_context or 4096
     available_ram = psutil.virtual_memory().available
-    usable_vram = initial.vram_total_gb * 1e9 * 0.90 - initial.vram_used_gb * 1e9
-    if not reusable and model_bytes and gpu_capacity_bytes > usable_vram:
+    usable_accelerator_memory = (
+        accelerator.total_memory_bytes * (0.80 if accelerator.kind == "tpu" else 0.90)
+        - initial.vram_used_gb * 1e9
+    )
+    if model_bytes and gpu_capacity_bytes > usable_accelerator_memory:
         raise RuntimeError(
-            f"Model weights plus GPU workspace ({gpu_capacity_bytes / 1e9:.2f} GB) "
-            f"exceed safe selected-GPU VRAM "
-            f"({usable_vram / 1e9:.2f} GB). Use more GPUs or a smaller quantization."
+            f"Model weights plus accelerator workspace ({gpu_capacity_bytes / 1e9:.2f} GB) "
+            f"exceed safe {accelerator.kind.upper()} memory "
+            f"({usable_accelerator_memory / 1e9:.2f} GB). Use more devices or a smaller quantization."
         )
-    if not reusable and model_bytes and ram_capacity_bytes > available_ram * 0.80:
+    if model_bytes and ram_capacity_bytes > available_ram * 0.80:
         raise RuntimeError(
             f"Model weights plus runtime headroom ({ram_capacity_bytes / 1e9:.2f} GB) "
             f"exceed the safe RAM loading limit "
             f"({available_ram * 0.80 / 1e9:.2f} GB)."
         )
-    if selected_context and args.context > selected_context:
+    if args.context and max_context and args.context > max_context:
         raise RuntimeError(
             f"Requested context {args.context:,} exceeds the estimated safe maximum "
-            f"{selected_context:,} for {args.gpus} GPU(s)."
+            f"{max_context:,} for {devices} {accelerator.kind.upper()} device(s)."
         )
-    state, reused = ensure_server(
-        args.engine, model, ref.source, args.gpus, args.context,
+    current = read_state()
+    requested_signature = (
+        ref.source, args.engine, accelerator.kind, devices, selected_context,
         args.spec_type, args.spec_draft_n_max,
     )
-    prompt_tokens = token_count(args.engine, model, args.prompt)
+    current_signature = (
+        current.get("source"), current.get("engine"), current.get("accelerator", "gpu"),
+        current.get("gpus"), current.get("context"), current.get("spec_type", "none"),
+        current.get("spec_draft_n_max", 2),
+    )
+    if current and requested_signature != current_signature:
+        clear_server()
+    reusable = server_matches(
+        args.engine, model, ref.source, devices, selected_context,
+        args.spec_type, args.spec_draft_n_max, accelerator.kind,
+    )
+    if current and requested_signature == current_signature and not reusable:
+        clear_server()
+    state, reused = ensure_server(
+        args.engine, model, ref.source, devices, selected_context,
+        args.spec_type, args.spec_draft_n_max, accelerator.kind,
+    )
+    prompt_tokens = token_count(args.engine, model, args.prompt, chat=True)
+    max_output_tokens = calculate_token_budget(selected_context, prompt_tokens, args.max_tokens)
     started = time.perf_counter()
     first_token_at: float | None = None
     previous_token_at: float | None = None
@@ -148,6 +203,7 @@ def command_run(args: argparse.Namespace) -> None:
     output_parts: list[str] = []
     intervals: list[float] = []
     samples = [initial]
+    live_output_tokens = 0
     with Live(
         console=console,
         refresh_per_second=4,
@@ -155,18 +211,24 @@ def command_run(args: argparse.Namespace) -> None:
         vertical_overflow="visible",
     ) as live:
         live.update(live_dashboard(
-            ref.name, args.engine, args.gpus, context_1, context_2,
+            ref.name, args.engine, accelerator.name, devices, selected_context,
+            prompt_tokens, live_output_tokens, max_output_tokens,
             "", "", args.thinking, initial, None, 0.0,
         ))
         for chunk in stream_completion(
-            model, args.prompt, args.max_tokens, args.temperature, thinking=args.thinking
+            model, args.prompt, max_output_tokens, args.temperature, thinking=args.thinking
         ):
             now = time.perf_counter()
-            if first_token_at is None:
-                first_token_at = now
-            if previous_token_at is not None:
-                intervals.append(now - previous_token_at)
-            previous_token_at = now
+            has_text = bool(chunk.reasoning or chunk.content)
+            if has_text:
+                if first_token_at is None:
+                    first_token_at = now
+                if previous_token_at is not None:
+                    intervals.append(now - previous_token_at)
+                previous_token_at = now
+                live_output_tokens += 1
+            if chunk.output_tokens is not None:
+                live_output_tokens = max(live_output_tokens, chunk.output_tokens)
             if chunk.reasoning:
                 reasoning_parts.append(chunk.reasoning)
             if chunk.content:
@@ -175,7 +237,8 @@ def command_run(args: argparse.Namespace) -> None:
             samples.append(sample)
             speed = (1 / intervals[-1]) if intervals and intervals[-1] > 0 else 0.0
             live.update(live_dashboard(
-                ref.name, args.engine, args.gpus, context_1, context_2,
+                ref.name, args.engine, accelerator.name, devices, selected_context,
+                prompt_tokens, live_output_tokens, max_output_tokens,
                 "".join(reasoning_parts), "".join(output_parts), args.thinking,
                 sample, first_token_at - started, speed,
             ))
@@ -195,14 +258,17 @@ def command_run(args: argparse.Namespace) -> None:
         "model_name": ref.name,
         "model_source": ref.source,
         "inference_engine": args.engine,
-        "num_gpus": args.gpus,
+        "accelerator_type": accelerator.kind,
+        "accelerator_name": accelerator.name,
+        "num_accelerators": devices,
+        "num_gpus": devices if accelerator.kind == "gpu" else 0,
         "spec_type": args.spec_type,
         "spec_draft_n_max": args.spec_draft_n_max,
         "mtp_enabled": args.spec_type == "draft-mtp",
         "server_reused": reused,
-        "context_requested": args.context,
-        "theoretical_max_context_1_gpu": context_1,
-        "theoretical_max_context_2_gpu": context_2,
+        "context_requested": args.context or "auto",
+        "max_context_window": selected_context,
+        "max_output_tokens": max_output_tokens,
         "prompt_text": args.prompt,
         "prompt_length_words": len(args.prompt.split()),
         "prompt_length_tokens": prompt_tokens,
@@ -230,16 +296,21 @@ def command_run(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="kgpu", description="Kaggle multi-GPU LLM inference")
+    parser = argparse.ArgumentParser(prog="kgpu", description="Kaggle accelerator LLM inference")
     subparsers = parser.add_subparsers(dest="command", required=True)
     setup = subparsers.add_parser("setup", help="Install an inference engine")
     setup.add_argument("--engine", choices=ENGINE_NAMES, default="llama.cpp")
+    setup.add_argument("--tpu", action="store_true", help="Force Kaggle TPU v5e-8 setup")
     run = subparsers.add_parser("run", help="Download/load a model and stream a response")
     run.add_argument("model")
     run.add_argument("--engine", choices=ENGINE_NAMES, default="llama.cpp")
-    run.add_argument("--gpus", type=int, choices=(1, 2), default=2)
-    run.add_argument("--context", type=int, default=4096)
-    run.add_argument("--max-tokens", type=int, default=256)
+    run.add_argument(
+        "--gpus", "--devices", dest="gpus", type=positive_int,
+        help="Device count (default: all detected devices)",
+    )
+    run.add_argument("--tpu", action="store_true", help="Force Kaggle TPU v5e-8 detection")
+    run.add_argument("--context", type=positive_int, help="Context cap (default: calculated maximum)")
+    run.add_argument("--max-tokens", type=positive_int, help="Output cap (default: remaining context)")
     run.add_argument("--temperature", type=float, default=0.7)
     run.add_argument(
         "--spec-type",
@@ -274,7 +345,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args(normalize_cli_args(sys.argv[1:]))
     if args.command == "setup":
-        setup_engine(args.engine)
+        setup_engine(args.engine, args.tpu)
     elif args.command == "run":
         command_run(args)
     elif args.command == "status":

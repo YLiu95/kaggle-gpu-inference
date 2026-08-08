@@ -5,17 +5,8 @@ import time
 from dataclasses import asdict, dataclass
 
 import psutil
-from pynvml import (
-    NVML_PCIE_UTIL_RX_BYTES,
-    NVML_PCIE_UTIL_TX_BYTES,
-    NVMLError,
-    nvmlDeviceGetCount,
-    nvmlDeviceGetHandleByIndex,
-    nvmlDeviceGetMemoryInfo,
-    nvmlDeviceGetPcieThroughput,
-    nvmlDeviceGetUtilizationRates,
-    nvmlInit,
-)
+
+from .hardware import Accelerator
 
 
 T4_FP16_TENSOR_FLOPS = 65e12
@@ -45,9 +36,19 @@ class Sample:
 
 
 class HardwareMonitor:
-    def __init__(self, gpu_count: int) -> None:
-        nvmlInit()
-        self.handles = [nvmlDeviceGetHandleByIndex(index) for index in range(min(gpu_count, nvmlDeviceGetCount()))]
+    def __init__(self, accelerator: Accelerator) -> None:
+        self.accelerator = accelerator
+        self.nvml = None
+        self.handles = []
+        if accelerator.kind == "gpu":
+            import pynvml
+
+            pynvml.nvmlInit()
+            self.nvml = pynvml
+            self.handles = [
+                pynvml.nvmlDeviceGetHandleByIndex(index)
+                for index in range(min(accelerator.device_count, pynvml.nvmlDeviceGetCount()))
+            ]
         psutil.cpu_percent(interval=None)
 
     def sample(self) -> Sample:
@@ -57,21 +58,25 @@ class HardwareMonitor:
         total: list[int] = []
         pcie_kbs = 0
         for handle in self.handles:
-            utilization = nvmlDeviceGetUtilizationRates(handle)
-            memory = nvmlDeviceGetMemoryInfo(handle)
+            utilization = self.nvml.nvmlDeviceGetUtilizationRates(handle)
+            memory = self.nvml.nvmlDeviceGetMemoryInfo(handle)
             gpu_utils.append(float(utilization.gpu))
             memory_utils.append(float(utilization.memory))
             used.append(memory.used)
             total.append(memory.total)
             try:
-                pcie_kbs += nvmlDeviceGetPcieThroughput(handle, NVML_PCIE_UTIL_RX_BYTES)
-                pcie_kbs += nvmlDeviceGetPcieThroughput(handle, NVML_PCIE_UTIL_TX_BYTES)
-            except NVMLError:
+                pcie_kbs += self.nvml.nvmlDeviceGetPcieThroughput(
+                    handle, self.nvml.NVML_PCIE_UTIL_RX_BYTES
+                )
+                pcie_kbs += self.nvml.nvmlDeviceGetPcieThroughput(
+                    handle, self.nvml.NVML_PCIE_UTIL_TX_BYTES
+                )
+            except self.nvml.NVMLError:
                 pass
         virtual_memory = psutil.virtual_memory()
         frequency = psutil.cpu_freq()
         used_total = sum(used)
-        vram_total = sum(total)
+        vram_total = sum(total) or self.accelerator.total_memory_bytes
         mean_gpu = statistics.fmean(gpu_utils) if gpu_utils else 0.0
         mean_memory = statistics.fmean(memory_utils) if memory_utils else 0.0
         return Sample(

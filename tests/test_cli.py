@@ -1,6 +1,12 @@
 import pytest
 
-from kaggle_gpu_inference.cli import build_parser, normalize_cli_args, parse_bool, spec_draft_count
+from kaggle_gpu_inference.cli import (
+    build_parser,
+    calculate_token_budget,
+    normalize_cli_args,
+    parse_bool,
+    spec_draft_count,
+)
 
 
 @pytest.mark.parametrize(
@@ -40,6 +46,24 @@ def test_mtp_cli_options() -> None:
     parsed = build_parser().parse_args(arguments)
     assert parsed.spec_type == "draft-mtp"
     assert parsed.spec_draft_n_max == 4
+
+
+def test_accelerator_and_token_limits_default_to_auto() -> None:
+    args = build_parser().parse_args(["run", "owner/model", "--prompt", "test", "--tpu"])
+    assert args.tpu is True
+    assert args.gpus is None
+    assert args.context is None
+    assert args.max_tokens is None
+
+
+def test_token_budget_uses_remaining_context_and_honors_cap() -> None:
+    assert calculate_token_budget(8192, 192, None) == 8000
+    assert calculate_token_budget(8192, 192, 512) == 512
+
+
+def test_token_budget_rejects_full_context() -> None:
+    with pytest.raises(RuntimeError, match="does not leave room"):
+        calculate_token_budget(100, 100, None)
 
 
 @pytest.mark.parametrize("value", ["0", "7"])

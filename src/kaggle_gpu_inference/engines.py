@@ -25,6 +25,7 @@ SPEC_TYPES = ("none", "draft-mtp")
 class StreamChunk:
     reasoning: str = ""
     content: str = ""
+    output_tokens: int | None = None
 
 
 def _server_command(
@@ -34,8 +35,11 @@ def _server_command(
     context: int,
     spec_type: str = "none",
     spec_draft_n_max: int = 2,
+    accelerator_kind: str = "gpu",
 ) -> list[str]:
     if engine == "llama.cpp":
+        if accelerator_kind != "gpu":
+            raise RuntimeError("llama.cpp is supported only on GPU; use vllm or sglang on TPU")
         binary = HOME / "vendor/llama.cpp/build/bin/llama-server"
         if not binary.exists():
             raise RuntimeError("llama.cpp is not installed; run: kgpu setup --engine llama.cpp")
@@ -59,6 +63,13 @@ def _server_command(
             "--tensor-parallel-size", str(gpus), "--gpu-memory-utilization", "0.90",
         ]
     if engine == "sglang":
+        if accelerator_kind == "tpu":
+            return [
+                sys.executable, "-u", "-m", "sgl_jax.launch_server", "--model-path", model,
+                "--host", "127.0.0.1", "--port", str(PORT), "--context-length", str(context),
+                "--tp-size", str(gpus), "--device", "tpu", "--dtype", "bfloat16",
+                "--mem-fraction-static", "0.8",
+            ]
         return [
             sys.executable, "-m", "sglang.launch_server", "--model-path", model,
             "--host", "127.0.0.1", "--port", str(PORT), "--context-length", str(context),
@@ -105,6 +116,7 @@ def server_matches(
     context: int,
     spec_type: str = "none",
     spec_draft_n_max: int = 2,
+    accelerator_kind: str = "gpu",
 ) -> bool:
     expected = {
         "engine": engine,
@@ -114,6 +126,7 @@ def server_matches(
         "context": context,
         "spec_type": spec_type,
         "spec_draft_n_max": spec_draft_n_max,
+        "accelerator": accelerator_kind,
     }
     state = read_state()
     return (
@@ -147,6 +160,7 @@ def ensure_server(
     context: int,
     spec_type: str = "none",
     spec_draft_n_max: int = 2,
+    accelerator_kind: str = "gpu",
 ) -> tuple[dict, bool]:
     ensure_dirs()
     signature = {
@@ -157,6 +171,7 @@ def ensure_server(
         "context": context,
         "spec_type": spec_type,
         "spec_draft_n_max": spec_draft_n_max,
+        "accelerator": accelerator_kind,
     }
     state = read_state()
     if (
@@ -166,10 +181,16 @@ def ensure_server(
     ):
         return state, True
     clear_server()
-    command = _server_command(engine, model, gpus, context, spec_type, spec_draft_n_max)
+    command = _server_command(
+        engine, model, gpus, context, spec_type, spec_draft_n_max, accelerator_kind
+    )
     log_path = RUNTIME_DIR / "server.log"
     environment = os.environ.copy()
-    environment["CUDA_VISIBLE_DEVICES"] = "0,1" if gpus == 2 else "0"
+    if accelerator_kind == "gpu":
+        environment["CUDA_VISIBLE_DEVICES"] = ",".join(str(index) for index in range(gpus))
+    else:
+        environment.pop("CUDA_VISIBLE_DEVICES", None)
+        environment.setdefault("JAX_COMPILATION_CACHE_DIR", str(RUNTIME_DIR / "jax_cache"))
     if token := hf_token():
         environment["HF_TOKEN"] = token
     log_handle = log_path.open("w")
@@ -216,6 +237,7 @@ def stream_completion(
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": True,
+        "stream_options": {"include_usage": True},
         "chat_template_kwargs": {"enable_thinking": thinking},
     }).encode()
     request = urllib.request.Request(
@@ -230,20 +252,31 @@ def stream_completion(
             if not line.startswith("data: ") or line == "data: [DONE]":
                 continue
             event = json.loads(line[6:])
+            usage = event.get("usage") or {}
+            output_tokens = usage.get("completion_tokens")
             choices = event.get("choices", [])
             if choices:
                 delta = choices[0].get("delta", {})
                 reasoning = delta.get("reasoning_content") or ""
                 content = delta.get("content") or ""
                 if reasoning or content:
-                    yield StreamChunk(reasoning=reasoning, content=content)
+                    yield StreamChunk(
+                        reasoning=reasoning,
+                        content=content,
+                        output_tokens=int(output_tokens) if output_tokens is not None else None,
+                    )
+            elif output_tokens is not None:
+                yield StreamChunk(output_tokens=int(output_tokens))
 
 
-def token_count(engine: str, model: str, text: str) -> int:
+def token_count(engine: str, model: str, text: str, chat: bool = False) -> int:
     if engine == "llama.cpp":
         body = {"content": text}
     elif engine == "vllm":
-        body = {"model": model, "prompt": text}
+        body = {"model": model}
+        body["messages" if chat else "prompt"] = (
+            [{"role": "user", "content": text}] if chat else text
+        )
     else:
         body = {"text": text}
     payload = json.dumps(body).encode()
@@ -259,4 +292,18 @@ def token_count(engine: str, model: str, text: str) -> int:
         tokens = result.get("tokens", [])
         return len(tokens) if isinstance(tokens, list) else int(tokens)
     except Exception:
-        return max(1, round(len(text.split()) * 1.3)) if text else 0
+        try:
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(model)
+            if chat and tokenizer.chat_template:
+                tokens = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": text}],
+                    tokenize=True,
+                    add_generation_prompt=True,
+                )
+            else:
+                tokens = tokenizer.encode(text, add_special_tokens=True)
+            return len(tokens)
+        except Exception:
+            return max(1, round(len(text.split()) * 1.3)) if text else 0

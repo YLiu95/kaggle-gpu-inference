@@ -1,15 +1,18 @@
-# Kaggle GPU Inference
+# Kaggle Accelerator Inference
 
-Run Hugging Face LLMs from Kaggle code cells on one or two GPUs, keep the loaded model alive between cells, stream output, and log hardware/generation metrics to CSV.
+Run Hugging Face LLMs on Kaggle GPUs or TPU v5e-8, keep the loaded model alive between cells, stream output, and log hardware/generation metrics to CSV.
 
 ## What It Supports
 
 - `llama.cpp`: GGUF file URLs, local GGUF files, or a repository plus `--filename`.
 - `vllm`: standard Hugging Face model repositories supported by vLLM.
-- `sglang`: standard Hugging Face model repositories supported by SGLang.
-- One or two GPUs. Changing the model, engine, GPU count, or context stops the previous server and releases its VRAM first.
+- `sglang`: standard Hugging Face model repositories supported by SGLang or SGL-JAX.
+- Automatic GPU/TPU detection. TPU runs use all eight v5e chips by default; GPU runs use all detected GPUs.
+- Automatic safe context selection from model architecture, weight size, device memory, and model limits.
+- Automatic maximum output budget from `max_context_window - input_tokens`.
+- Explicit `--context`, `--max-tokens`, and `--devices` values act as caps.
 - Persistent model server reuse across repeated `!kgpu run` cells.
-- Live streaming output with GPU, VRAM, PCIe, CPU, and RAM statistics.
+- Live max-context, input-token, output-token, output-limit, accelerator, CPU, and RAM statistics.
 - CSV history at `/root/kaggle-gpu-inference/logs/inference_runs.csv`, mirrored to `/kaggle/working/inference_runs.csv`.
 - Preflight checks reject model weights or requested contexts that exceed safe RAM/VRAM estimates before a new server loads.
 
@@ -17,7 +20,7 @@ Compute throughput and GPU memory throughput are estimates based on NVML utiliza
 
 ## Kaggle Setup
 
-Enable two T4 GPUs and Internet in the Kaggle notebook settings. In a code cell:
+Enable an accelerator and Internet in the Kaggle notebook settings. For a GPU notebook:
 
 ```bash
 !git clone https://github.com/YLiu95/kaggle-gpu-inference.git /root/kaggle-gpu-inference
@@ -26,6 +29,35 @@ Enable two T4 GPUs and Internet in the Kaggle notebook settings. In a code cell:
 ```
 
 `kgpu` automatically reads `HF_TOKEN` from Kaggle Secrets when needed. It never writes the token to the repository or logs.
+
+GPU setup never imports JAX or performs TPU setup. TPU setup never initializes NVML, compiles CUDA code, or exports CUDA device selection.
+
+## Kaggle TPU v5e-8
+
+Install only the TPU engine you intend to use. vLLM TPU requires Python 3.11+; SGL-JAX requires Python 3.12+.
+
+```bash
+!pip install -e /root/kaggle-gpu-inference
+!kgpu setup --engine vllm --tpu
+```
+
+```bash
+!kgpu run "https://huggingface.co/google/gemma-4-26B-A4B" \
+  --engine vllm \
+  --tpu \
+  --temperature 0.7 \
+  --thinking true \
+  --prompt "Design a Python pairs-trading backtest for PEP and KO."
+```
+
+For SGL-JAX:
+
+```bash
+!kgpu setup --engine sglang --tpu
+!kgpu run "Qwen/Qwen3-8B" --engine sglang --tpu --prompt "Explain TPU tensor parallelism."
+```
+
+`--tpu` is optional when TPU runtime markers are visible, and is useful in tunneled sessions that hide those markers. Both TPU engines set tensor parallel size to all detected chips (eight on v5e-8). SGLang TPU launches through `sgl_jax.launch_server`; it does not install or launch the CUDA SGLang runtime.
 
 The llama.cpp build uses two CPU jobs to stay within Kaggle's RAM limit. Model downloads use the Hugging Face cache under `/root/kaggle-gpu-inference/models` and are not repeated when already complete.
 
@@ -79,7 +111,7 @@ For llama.cpp-compatible MTP models, enable multi-token prediction with `--spec-
 
 Changing either speculative-decoding option restarts the managed server once; subsequent commands with the same model and settings reuse it. MTP configuration is recorded in the CSV columns `spec_type`, `spec_draft_n_max`, and `mtp_enabled`.
 
-Use one GPU with `--gpus 1`. The second GPU remains available, but the model must fit in approximately 90% of one T4's VRAM.
+Use one GPU with `--devices 1`. Other GPUs remain available, but the model must fit in approximately 90% of the selected device memory.
 
 ## vLLM And SGLang
 
@@ -87,12 +119,12 @@ These engines load repository-format models, not GGUF files. Install only the en
 
 ```bash
 !kgpu setup --engine vllm
-!kgpu run "Qwen/Qwen2.5-7B-Instruct" --engine vllm --gpus 2 --context 4096 --prompt "Write a CUDA learning plan."
+!kgpu run "Qwen/Qwen2.5-7B-Instruct" --engine vllm --devices 2 --context 4096 --prompt "Write a CUDA learning plan."
 ```
 
 ```bash
 !kgpu setup --engine sglang
-!kgpu run "Qwen/Qwen2.5-7B-Instruct" --engine sglang --gpus 2 --context 4096 --prompt "Write a CUDA learning plan."
+!kgpu run "Qwen/Qwen2.5-7B-Instruct" --engine sglang --devices 2 --context 4096 --prompt "Write a CUDA learning plan."
 ```
 
 Package and CUDA compatibility changes quickly for vLLM/SGLang. Installing both in one Kaggle environment is discouraged because their pinned dependencies can conflict.
@@ -108,9 +140,9 @@ Package and CUDA compatibility changes quickly for vLLM/SGLang. Installing both 
 
 ## Output And Logs
 
-The top live section contains model/engine details, theoretical one/two-GPU context estimates, TTFT, token speed, estimated compute and memory throughput, PCIe throughput, VRAM, CPU utilization/frequency, and RAM. Streaming text appears in the middle. A fixed summary appears at completion.
+The top live section contains model/engine and accelerator details, maximum context window, input tokens, real-time output tokens, calculated maximum output tokens, TTFT, token speed, accelerator memory, CPU, and RAM. Streaming text appears in the middle. A fixed summary appears at completion.
 
-Each CSV row includes the model, engine, GPU count, prompt/output text and word/token counts, context estimates, TTFT, token-speed statistics, and min/average/max values for every sampled GPU/CPU metric. Context estimates require a usable Hugging Face `config.json`; otherwise they display `unknown/not fit` and log `0`.
+Each CSV row includes the model, engine, accelerator type/count, selected context and output limits, prompt/output text and token counts, TTFT, token-speed statistics, and sampled hardware metrics. Context calculation uses Hugging Face or GGUF architecture metadata and falls back to 4,096 only when metadata is unavailable.
 
 ## Development
 

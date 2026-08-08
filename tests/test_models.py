@@ -3,7 +3,7 @@ import struct
 
 import pytest
 
-from kaggle_gpu_inference.models import context_estimates, load_gguf_config, parse_model_ref
+from kaggle_gpu_inference.models import context_estimate, context_estimates, load_gguf_config, parse_model_ref
 
 
 MODEL_URL = (
@@ -57,6 +57,19 @@ def test_context_estimate_returns_zero_when_weights_do_not_fit() -> None:
         "hidden_size": 4096,
     }
     assert context_estimates(20_000_000_000, config, 16_000_000_000)[0] == 0
+
+
+def test_context_estimate_uses_all_tpu_devices_and_nested_text_config() -> None:
+    config = {
+        "text_config": {
+            "num_hidden_layers": 32,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "hidden_size": 4096,
+            "max_position_embeddings": 131072,
+        }
+    }
+    assert context_estimate(52_000_000_000, config, 16 * 1024**3, 8) == 131072
 
 
 def test_load_gguf_config(tmp_path: Path) -> None:

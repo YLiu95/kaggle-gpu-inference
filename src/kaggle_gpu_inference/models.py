@@ -100,6 +100,13 @@ def load_hf_config(ref: ModelRef) -> dict:
         return {}
 
 
+def text_model_config(config: dict) -> dict:
+    nested = config.get("text_config")
+    if isinstance(nested, dict):
+        return {**config, **nested}
+    return config
+
+
 def load_gguf_config(model: str) -> dict:
     path = Path(model)
     if not path.is_file() or path.suffix.lower() != ".gguf":
@@ -163,21 +170,31 @@ def load_gguf_config(model: str) -> dict:
         return {}
 
 
-def context_estimates(model_bytes: int, config: dict, vram_per_gpu: int) -> tuple[int, int]:
+def context_estimate(
+    model_bytes: int,
+    config: dict,
+    memory_per_device: int,
+    devices: int,
+    memory_utilization: float = 0.90,
+) -> int:
+    config = text_model_config(config)
     layers = int(config.get("num_hidden_layers", 0))
     heads = int(config.get("num_attention_heads", 0))
     kv_heads = int(config.get("num_key_value_heads", heads))
     hidden = int(config.get("hidden_size", 0))
     model_limit = int(config.get("max_position_embeddings", 0))
     if not all((layers, heads, kv_heads, hidden)):
-        return (0, 0)
+        return model_limit
     kv_bytes_per_token = 2 * layers * kv_heads * (hidden // heads) * 2
+    usable = int(memory_per_device * devices * memory_utilization) - model_bytes
+    if usable <= 0:
+        return 0
+    value = usable // kv_bytes_per_token
+    return min(value, model_limit) if model_limit else value
 
-    def estimate(gpus: int) -> int:
-        usable = int(vram_per_gpu * gpus * 0.90) - model_bytes
-        if usable <= 0:
-            return 0
-        value = usable // kv_bytes_per_token
-        return min(value, model_limit) if model_limit else value
 
-    return estimate(1), estimate(2)
+def context_estimates(model_bytes: int, config: dict, vram_per_gpu: int) -> tuple[int, int]:
+    return (
+        context_estimate(model_bytes, config, vram_per_gpu, 1),
+        context_estimate(model_bytes, config, vram_per_gpu, 2),
+    )
