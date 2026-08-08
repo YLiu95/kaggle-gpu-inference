@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kaggle-gpu-inference"
+version = "0.1.0"
+description = "Persistent multi-GPU LLM inference runner for Kaggle notebooks"
+requires-python = ">=3.10"
+dependencies = [
+    "huggingface-hub>=0.27",
+    "nvidia-ml-py>=12.560",
+    "psutil>=5.9",
+    "rich>=13.9",
+]
+
+[project.scripts]
+kgpu = "kaggle_gpu_inference.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

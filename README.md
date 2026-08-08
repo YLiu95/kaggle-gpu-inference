@@ -1,0 +1,91 @@
+# Kaggle GPU Inference
+
+Run Hugging Face LLMs from Kaggle code cells on one or two GPUs, keep the loaded model alive between cells, stream output, and log hardware/generation metrics to CSV.
+
+## What It Supports
+
+- `llama.cpp`: GGUF file URLs, local GGUF files, or a repository plus `--filename`.
+- `vllm`: standard Hugging Face model repositories supported by vLLM.
+- `sglang`: standard Hugging Face model repositories supported by SGLang.
+- One or two GPUs. Changing the model, engine, GPU count, or context stops the previous server and releases its VRAM first.
+- Persistent model server reuse across repeated `!kgpu run` cells.
+- Live streaming output with GPU, VRAM, PCIe, CPU, and RAM statistics.
+- CSV history at `/root/kaggle-gpu-inference/logs/inference_runs.csv`, mirrored to `/kaggle/working/inference_runs.csv`.
+- Preflight checks reject model weights or requested contexts that exceed safe RAM/VRAM estimates before a new server loads.
+
+Compute throughput and GPU memory throughput are estimates based on NVML utilization multiplied by Tesla T4 peak FP16 tensor throughput (65 TFLOPS) and memory bandwidth (320 GB/s). NVML does not expose measured FLOP counts. GPU-CPU throughput uses measured NVML PCIe RX/TX counters when the driver supports them.
+
+## Kaggle Setup
+
+Enable two T4 GPUs and Internet in the Kaggle notebook settings. In a code cell:
+
+```bash
+!git clone https://github.com/YLiu95/kaggle-gpu-inference.git /root/kaggle-gpu-inference
+!pip install -e /root/kaggle-gpu-inference
+!kgpu setup --engine llama.cpp
+```
+
+`kgpu` automatically reads `HF_TOKEN` from Kaggle Secrets when needed. It never writes the token to the repository or logs.
+
+The llama.cpp build uses two CPU jobs to stay within Kaggle's RAM limit. Model downloads use the Hugging Face cache under `/root/kaggle-gpu-inference/models` and are not repeated when already complete.
+
+## Run A GGUF Model
+
+The URL may be copied directly from a Hugging Face file page:
+
+```bash
+!kgpu run "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/main/Qwen3.6-35B-A3B-UD-IQ1_M.gguf" \
+  --engine llama.cpp \
+  --gpus 2 \
+  --context 4096 \
+  --max-tokens 256 \
+  --temperature 0.7 \
+  --prompt "Explain mixture-of-experts routing in plain English."
+```
+
+Run another prompt with the same settings to reuse the model already in VRAM:
+
+```bash
+!kgpu run "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/main/Qwen3.6-35B-A3B-UD-IQ1_M.gguf" --engine llama.cpp --gpus 2 --context 4096 --prompt "Now give a concrete example."
+```
+
+Use one GPU with `--gpus 1`. The second GPU remains available, but the model must fit in approximately 90% of one T4's VRAM.
+
+## vLLM And SGLang
+
+These engines load repository-format models, not GGUF files. Install only the engine needed because their dependency sets are large:
+
+```bash
+!kgpu setup --engine vllm
+!kgpu run "Qwen/Qwen2.5-7B-Instruct" --engine vllm --gpus 2 --context 4096 --prompt "Write a CUDA learning plan."
+```
+
+```bash
+!kgpu setup --engine sglang
+!kgpu run "Qwen/Qwen2.5-7B-Instruct" --engine sglang --gpus 2 --context 4096 --prompt "Write a CUDA learning plan."
+```
+
+Package and CUDA compatibility changes quickly for vLLM/SGLang. Installing both in one Kaggle environment is discouraged because their pinned dependencies can conflict.
+
+## Control Commands
+
+```bash
+!kgpu status
+!kgpu clear-vram
+```
+
+`clear-vram` stops the server managed by this tool. It does not kill unrelated GPU processes.
+
+## Output And Logs
+
+The top live section contains model/engine details, theoretical one/two-GPU context estimates, TTFT, token speed, estimated compute and memory throughput, PCIe throughput, VRAM, CPU utilization/frequency, and RAM. Streaming text appears in the middle. A fixed summary appears at completion.
+
+Each CSV row includes the model, engine, GPU count, prompt/output text and word/token counts, context estimates, TTFT, token-speed statistics, and min/average/max values for every sampled GPU/CPU metric. Context estimates require a usable Hugging Face `config.json`; otherwise they display `unknown/not fit` and log `0`.
+
+## Development
+
+```bash
+cd /root/kaggle-gpu-inference
+pip install -e '.[test]'
+pytest -q
+```
