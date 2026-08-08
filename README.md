@@ -61,6 +61,24 @@ Thinking mode is disabled by default so Qwen3-family models return an answer wit
   --prompt "How many r letters are in the word raspberry?"
 ```
 
+## MTP Speculative Decoding
+
+For llama.cpp-compatible MTP models, enable multi-token prediction with `--spec-type draft-mtp`. Unsloth recommends starting with `--spec-draft-n-max 2`; values from 1 through 6 can be benchmarked for the specific model and GPU. MTP requires roughly 2 GB of additional RAM/VRAM headroom; preflight reserves system-memory headroom plus GPU workspace before launch.
+
+```bash
+!kgpu run "https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF/blob/main/Qwen3.5-9B-UD-Q8_K_XL.gguf" \
+  --engine llama.cpp \
+  --gpus 1 \
+  --context 8192 \
+  --max-tokens 8192 \
+  --thinking true \
+  --spec-type draft-mtp \
+  --spec-draft-n-max 2 \
+  --prompt "Design a Python backtest for a PEP/KO pairs-trading strategy."
+```
+
+Changing either speculative-decoding option restarts the managed server once; subsequent commands with the same model and settings reuse it. MTP configuration is recorded in the CSV columns `spec_type`, `spec_draft_n_max`, and `mtp_enabled`.
+
 Use one GPU with `--gpus 1`. The second GPU remains available, but the model must fit in approximately 90% of one T4's VRAM.
 
 ## vLLM And SGLang

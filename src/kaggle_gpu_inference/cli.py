@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.live import Live
 
 from .config import HOME, ensure_dirs, read_state
-from .engines import ENGINE_NAMES, clear_server, ensure_server, server_matches, stream_completion, token_count
+from .engines import ENGINE_NAMES, SPEC_TYPES, clear_server, ensure_server, server_matches, stream_completion, token_count
 from .models import context_estimates, estimated_model_size_bytes, load_gguf_config, load_hf_config, parse_model_ref, resolve_model
 from .monitor import HardwareMonitor, aggregate_samples
 from .reporting import append_csv, final_summary, live_dashboard
@@ -22,6 +22,9 @@ from .reporting import append_csv, final_summary, live_dashboard
 
 console = Console()
 BOOLEAN_VALUES = {"true", "false", "1", "0", "yes", "no", "on", "off"}
+MTP_GPU_HEADROOM_BYTES = 500_000_000
+MTP_RAM_HEADROOM_BYTES = 2_000_000_000
+MTP_KV_HEADROOM_PER_DRAFT_TOKEN_BYTES = 64_000_000
 
 
 def parse_bool(value: str | bool) -> bool:
@@ -45,6 +48,13 @@ def normalize_cli_args(arguments: list[str]) -> list[str]:
                 continue
         normalized.append(argument)
     return normalized
+
+
+def spec_draft_count(value: str) -> int:
+    count = int(value)
+    if not 1 <= count <= 6:
+        raise argparse.ArgumentTypeError("expected a value from 1 through 6")
+    return count
 
 
 def setup_engine(engine: str) -> None:
@@ -72,16 +82,24 @@ def setup_engine(engine: str) -> None:
 
 
 def command_run(args: argparse.Namespace) -> None:
+    if args.engine != "llama.cpp" and args.spec_type != "none":
+        raise ValueError("--spec-type is currently supported only by the llama.cpp engine")
     ref = parse_model_ref(args.model, args.filename)
     current = read_state()
-    requested_signature = (ref.source, args.engine, args.gpus, args.context)
+    requested_signature = (
+        ref.source, args.engine, args.gpus, args.context, args.spec_type, args.spec_draft_n_max
+    )
     current_signature = (
-        current.get("source"), current.get("engine"), current.get("gpus"), current.get("context")
+        current.get("source"), current.get("engine"), current.get("gpus"), current.get("context"),
+        current.get("spec_type", "none"), current.get("spec_draft_n_max", 2),
     )
     if current and requested_signature != current_signature:
         clear_server()
     model = resolve_model(ref, args.engine)
-    reusable = server_matches(args.engine, model, ref.source, args.gpus, args.context)
+    reusable = server_matches(
+        args.engine, model, ref.source, args.gpus, args.context,
+        args.spec_type, args.spec_draft_n_max,
+    )
     if current and requested_signature == current_signature and not reusable:
         clear_server()
     monitor = HardwareMonitor(args.gpus)
@@ -89,18 +107,28 @@ def command_run(args: argparse.Namespace) -> None:
     model_bytes = estimated_model_size_bytes(ref, model)
     config = {**load_hf_config(ref), **{key: value for key, value in load_gguf_config(model).items() if value}}
     per_gpu_vram = int(initial.vram_total_gb * 1e9 / max(1, args.gpus))
-    context_1, context_2 = context_estimates(model_bytes, config, per_gpu_vram)
+    mtp_gpu_headroom = MTP_GPU_HEADROOM_BYTES if args.spec_type == "draft-mtp" else 0
+    mtp_ram_headroom = MTP_RAM_HEADROOM_BYTES if args.spec_type == "draft-mtp" else 0
+    mtp_kv_headroom = (
+        MTP_KV_HEADROOM_PER_DRAFT_TOKEN_BYTES * args.spec_draft_n_max
+        if args.spec_type == "draft-mtp" else 0
+    )
+    gpu_capacity_bytes = model_bytes + mtp_gpu_headroom
+    ram_capacity_bytes = model_bytes + mtp_ram_headroom
+    context_1, context_2 = context_estimates(model_bytes + mtp_kv_headroom, config, per_gpu_vram)
     selected_context = context_1 if args.gpus == 1 else context_2
     available_ram = psutil.virtual_memory().available
     usable_vram = initial.vram_total_gb * 1e9 * 0.90 - initial.vram_used_gb * 1e9
-    if not reusable and model_bytes and model_bytes > usable_vram:
+    if not reusable and model_bytes and gpu_capacity_bytes > usable_vram:
         raise RuntimeError(
-            f"Model weights ({model_bytes / 1e9:.2f} GB) exceed safe selected-GPU VRAM "
+            f"Model weights plus GPU workspace ({gpu_capacity_bytes / 1e9:.2f} GB) "
+            f"exceed safe selected-GPU VRAM "
             f"({usable_vram / 1e9:.2f} GB). Use more GPUs or a smaller quantization."
         )
-    if not reusable and model_bytes and model_bytes > available_ram * 0.80:
+    if not reusable and model_bytes and ram_capacity_bytes > available_ram * 0.80:
         raise RuntimeError(
-            f"Model weights ({model_bytes / 1e9:.2f} GB) exceed the safe RAM loading limit "
+            f"Model weights plus runtime headroom ({ram_capacity_bytes / 1e9:.2f} GB) "
+            f"exceed the safe RAM loading limit "
             f"({available_ram * 0.80 / 1e9:.2f} GB)."
         )
     if selected_context and args.context > selected_context:
@@ -108,7 +136,10 @@ def command_run(args: argparse.Namespace) -> None:
             f"Requested context {args.context:,} exceeds the estimated safe maximum "
             f"{selected_context:,} for {args.gpus} GPU(s)."
         )
-    state, reused = ensure_server(args.engine, model, ref.source, args.gpus, args.context)
+    state, reused = ensure_server(
+        args.engine, model, ref.source, args.gpus, args.context,
+        args.spec_type, args.spec_draft_n_max,
+    )
     prompt_tokens = token_count(args.engine, model, args.prompt)
     started = time.perf_counter()
     first_token_at: float | None = None
@@ -165,6 +196,9 @@ def command_run(args: argparse.Namespace) -> None:
         "model_source": ref.source,
         "inference_engine": args.engine,
         "num_gpus": args.gpus,
+        "spec_type": args.spec_type,
+        "spec_draft_n_max": args.spec_draft_n_max,
+        "mtp_enabled": args.spec_type == "draft-mtp",
         "server_reused": reused,
         "context_requested": args.context,
         "theoretical_max_context_1_gpu": context_1,
@@ -207,6 +241,19 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--context", type=int, default=4096)
     run.add_argument("--max-tokens", type=int, default=256)
     run.add_argument("--temperature", type=float, default=0.7)
+    run.add_argument(
+        "--spec-type",
+        choices=SPEC_TYPES,
+        default="none",
+        help="Speculative decoding mode; use draft-mtp for an MTP model",
+    )
+    run.add_argument(
+        "--spec-draft-n-max",
+        type=spec_draft_count,
+        default=2,
+        metavar="N",
+        help="Maximum MTP draft tokens, 1-6 (default: 2)",
+    )
     run.add_argument(
         "--thinking",
         nargs="?",

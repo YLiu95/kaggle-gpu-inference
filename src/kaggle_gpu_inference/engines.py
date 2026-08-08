@@ -18,6 +18,7 @@ from .config import HOME, PORT, RUNTIME_DIR, STATE_FILE, ensure_dirs, hf_token, 
 
 
 ENGINE_NAMES = ("llama.cpp", "vllm", "sglang")
+SPEC_TYPES = ("none", "draft-mtp")
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,14 @@ class StreamChunk:
     content: str = ""
 
 
-def _server_command(engine: str, model: str, gpus: int, context: int) -> list[str]:
+def _server_command(
+    engine: str,
+    model: str,
+    gpus: int,
+    context: int,
+    spec_type: str = "none",
+    spec_draft_n_max: int = 2,
+) -> list[str]:
     if engine == "llama.cpp":
         binary = HOME / "vendor/llama.cpp/build/bin/llama-server"
         if not binary.exists():
@@ -38,6 +46,11 @@ def _server_command(engine: str, model: str, gpus: int, context: int) -> list[st
         ]
         if gpus == 2:
             command.extend(["--split-mode", "layer", "--tensor-split", "1,1"])
+        if spec_type != "none":
+            command.extend([
+                "--spec-type", spec_type,
+                "--spec-draft-n-max", str(spec_draft_n_max),
+            ])
         return command
     if engine == "vllm":
         return [
@@ -84,8 +97,24 @@ def _stop_group(pid: int, force: bool = False) -> None:
         pass
 
 
-def server_matches(engine: str, model: str, source: str, gpus: int, context: int) -> bool:
-    expected = {"engine": engine, "model": model, "source": source, "gpus": gpus, "context": context}
+def server_matches(
+    engine: str,
+    model: str,
+    source: str,
+    gpus: int,
+    context: int,
+    spec_type: str = "none",
+    spec_draft_n_max: int = 2,
+) -> bool:
+    expected = {
+        "engine": engine,
+        "model": model,
+        "source": source,
+        "gpus": gpus,
+        "context": context,
+        "spec_type": spec_type,
+        "spec_draft_n_max": spec_draft_n_max,
+    }
     state = read_state()
     return (
         _state_process_running(state)
@@ -110,9 +139,25 @@ def clear_server() -> bool:
     return stopped
 
 
-def ensure_server(engine: str, model: str, source: str, gpus: int, context: int) -> tuple[dict, bool]:
+def ensure_server(
+    engine: str,
+    model: str,
+    source: str,
+    gpus: int,
+    context: int,
+    spec_type: str = "none",
+    spec_draft_n_max: int = 2,
+) -> tuple[dict, bool]:
     ensure_dirs()
-    signature = {"engine": engine, "model": model, "source": source, "gpus": gpus, "context": context}
+    signature = {
+        "engine": engine,
+        "model": model,
+        "source": source,
+        "gpus": gpus,
+        "context": context,
+        "spec_type": spec_type,
+        "spec_draft_n_max": spec_draft_n_max,
+    }
     state = read_state()
     if (
         _state_process_running(state)
@@ -121,7 +166,7 @@ def ensure_server(engine: str, model: str, source: str, gpus: int, context: int)
     ):
         return state, True
     clear_server()
-    command = _server_command(engine, model, gpus, context)
+    command = _server_command(engine, model, gpus, context, spec_type, spec_draft_n_max)
     log_path = RUNTIME_DIR / "server.log"
     environment = os.environ.copy()
     environment["CUDA_VISIBLE_DEVICES"] = "0,1" if gpus == 2 else "0"

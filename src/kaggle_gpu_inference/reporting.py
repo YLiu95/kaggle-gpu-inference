@@ -53,13 +53,14 @@ def live_dashboard(
         _metric("CPU", f"{sample.cpu_percent:.1f}% @ {sample.cpu_speed_ghz:.2f} GHz"),
         _metric("CPU RAM", f"{sample.ram_used_gb:.2f}/{sample.ram_total_gb:.2f} GB ({sample.ram_percent:.1f}%)"),
     ], equal=True, expand=True)
-    panels = [Panel(top, title="Inference", border_style="cyan")]
+    panels = []
     if show_reasoning:
         reasoning_stream = Text(reasoning or "Waiting for reasoning tokens...", overflow="fold")
         panels.append(Panel(reasoning_stream, title="Reasoning tokens", border_style="yellow"))
     response_stream = Text(output or "Waiting for response tokens...", overflow="fold")
     response_title = "Response tokens" if show_reasoning else "Streaming tokens"
     panels.append(Panel(response_stream, title=response_title, border_style="green"))
+    panels.append(Panel(top, title="Inference", border_style="cyan"))
     return Group(*panels)
 
 

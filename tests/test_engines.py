@@ -38,6 +38,18 @@ def test_state_process_running_rejects_reused_pid() -> None:
     })
 
 
+def test_llama_server_command_enables_mtp() -> None:
+    command = engines._server_command("llama.cpp", "/model.gguf", 1, 8192, "draft-mtp", 2)
+    assert command[command.index("--spec-type") + 1] == "draft-mtp"
+    assert command[command.index("--spec-draft-n-max") + 1] == "2"
+
+
+def test_llama_server_command_omits_disabled_speculation() -> None:
+    command = engines._server_command("llama.cpp", "/model.gguf", 1, 8192)
+    assert "--spec-type" not in command
+    assert "--spec-draft-n-max" not in command
+
+
 def test_stream_completion_sends_requested_model(monkeypatch) -> None:
     captured = {}
 

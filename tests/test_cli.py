@@ -1,6 +1,6 @@
 import pytest
 
-from kaggle_gpu_inference.cli import build_parser, normalize_cli_args, parse_bool
+from kaggle_gpu_inference.cli import build_parser, normalize_cli_args, parse_bool, spec_draft_count
 
 
 @pytest.mark.parametrize(
@@ -30,3 +30,19 @@ def test_bare_thinking_before_model_is_not_consumed() -> None:
 def test_parse_bool_rejects_unknown_value() -> None:
     with pytest.raises(Exception):
         parse_bool("maybe")
+
+
+def test_mtp_cli_options() -> None:
+    arguments = [
+        "run", "owner/model", "--prompt", "test",
+        "--spec-type", "draft-mtp", "--spec-draft-n-max", "4",
+    ]
+    parsed = build_parser().parse_args(arguments)
+    assert parsed.spec_type == "draft-mtp"
+    assert parsed.spec_draft_n_max == 4
+
+
+@pytest.mark.parametrize("value", ["0", "7"])
+def test_mtp_draft_count_rejects_out_of_range(value: str) -> None:
+    with pytest.raises(Exception):
+        spec_draft_count(value)

@@ -34,6 +34,7 @@ def test_stream_panel_preserves_long_output() -> None:
     assert "Reasoning tokens" in rendered
     assert "Response tokens" in rendered
     assert "reasoning" in rendered
+    assert rendered.index("Reasoning tokens") < rendered.index("Response tokens") < rendered.index("Inference")
     assert "generated-line-00" in rendered
     assert "generated-line-29" in rendered
 
