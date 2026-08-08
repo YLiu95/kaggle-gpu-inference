@@ -54,7 +54,7 @@ def live_dashboard(
     stream = Text(output or "Waiting for first token...", overflow="fold")
     return Group(
         Panel(top, title="Inference", border_style="cyan"),
-        Panel(stream, title="Streaming tokens", border_style="green", height=14),
+        Panel(stream, title="Streaming tokens", border_style="green"),
     )
 
 

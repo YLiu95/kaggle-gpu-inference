@@ -92,7 +92,12 @@ def command_run(args: argparse.Namespace) -> None:
     output_parts: list[str] = []
     intervals: list[float] = []
     samples = [initial]
-    with Live(console=console, refresh_per_second=4, transient=False) as live:
+    with Live(
+        console=console,
+        refresh_per_second=4,
+        transient=False,
+        vertical_overflow="visible",
+    ) as live:
         live.update(live_dashboard(ref.name, args.engine, args.gpus, context_1, context_2, "", initial, None, 0.0))
         for token in stream_completion(
             model, args.prompt, args.max_tokens, args.temperature, thinking=args.thinking

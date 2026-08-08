@@ -1,6 +1,36 @@
 import csv
 
+from rich.console import Console
+
 from kaggle_gpu_inference import reporting
+from kaggle_gpu_inference.monitor import Sample
+
+
+def test_stream_panel_preserves_long_output() -> None:
+    sample = Sample(
+        timestamp=0,
+        gpu_util_percent=0,
+        gpu_memory_util_percent=0,
+        vram_used_gb=1,
+        vram_total_gb=16,
+        vram_percent=6.25,
+        estimated_flops=0,
+        estimated_gpu_memory_gbs=0,
+        gpu_cpu_gbs=0,
+        cpu_percent=0,
+        cpu_speed_ghz=2,
+        ram_used_gb=2,
+        ram_total_gb=32,
+        ram_percent=6.25,
+    )
+    output = "\n".join(f"generated-line-{index:02d}" for index in range(30))
+    console = Console(record=True, width=100, height=60)
+
+    console.print(reporting.live_dashboard("model", "llama.cpp", 1, 4096, 8192, output, sample, 0.1, 20))
+
+    rendered = console.export_text()
+    assert "generated-line-00" in rendered
+    assert "generated-line-29" in rendered
 
 
 def test_append_csv_preserves_old_rows_when_schema_grows(tmp_path, monkeypatch) -> None:
