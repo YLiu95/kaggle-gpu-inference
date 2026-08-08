@@ -49,7 +49,17 @@ Run another prompt with the same settings to reuse the model already in VRAM:
 !kgpu run "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/main/Qwen3.6-35B-A3B-UD-IQ1_M.gguf" --engine llama.cpp --gpus 2 --context 4096 --prompt "Now give a concrete example."
 ```
 
-Thinking mode is disabled by default so Qwen3-family models return an answer within the output budget. Add `--thinking` to stream their reasoning tokens as well as the final answer; increase `--max-tokens` because reasoning consumes that same budget.
+Thinking mode is disabled by default so Qwen3-family models return an answer within the output budget. Use `--thinking true` (or the `--thinking` shorthand) to show reasoning and response tokens in separate streaming sections. Use `--thinking false` or `--no-thinking` to disable it. Increase `--max-tokens` because reasoning consumes that same budget. Reasoning tokens are included in output-token speed metrics and CSV `output_length_*` totals, with separate `reasoning_*` and `response_*` columns retained for analysis.
+
+```bash
+!kgpu run "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/blob/main/Qwen3-0.6B-UD-Q8_K_XL.gguf" \
+  --engine llama.cpp \
+  --gpus 1 \
+  --context 4096 \
+  --max-tokens 1024 \
+  --thinking true \
+  --prompt "How many r letters are in the word raspberry?"
+```
 
 Use one GPU with `--gpus 1`. The second GPU remains available, but the model must fit in approximately 90% of one T4's VRAM.
 

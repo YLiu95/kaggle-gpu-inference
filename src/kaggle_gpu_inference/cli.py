@@ -21,6 +21,30 @@ from .reporting import append_csv, final_summary, live_dashboard
 
 
 console = Console()
+BOOLEAN_VALUES = {"true", "false", "1", "0", "yes", "no", "on", "off"}
+
+
+def parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = value.lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError("expected true or false")
+
+
+def normalize_cli_args(arguments: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for index, argument in enumerate(arguments):
+        if argument == "--thinking":
+            next_argument = arguments[index + 1].lower() if index + 1 < len(arguments) else ""
+            if next_argument not in BOOLEAN_VALUES:
+                normalized.append("--thinking=true")
+                continue
+        normalized.append(argument)
+    return normalized
 
 
 def setup_engine(engine: str) -> None:
@@ -89,6 +113,7 @@ def command_run(args: argparse.Namespace) -> None:
     started = time.perf_counter()
     first_token_at: float | None = None
     previous_token_at: float | None = None
+    reasoning_parts: list[str] = []
     output_parts: list[str] = []
     intervals: list[float] = []
     samples = [initial]
@@ -98,8 +123,11 @@ def command_run(args: argparse.Namespace) -> None:
         transient=False,
         vertical_overflow="visible",
     ) as live:
-        live.update(live_dashboard(ref.name, args.engine, args.gpus, context_1, context_2, "", initial, None, 0.0))
-        for token in stream_completion(
+        live.update(live_dashboard(
+            ref.name, args.engine, args.gpus, context_1, context_2,
+            "", "", args.thinking, initial, None, 0.0,
+        ))
+        for chunk in stream_completion(
             model, args.prompt, args.max_tokens, args.temperature, thinking=args.thinking
         ):
             now = time.perf_counter()
@@ -108,21 +136,29 @@ def command_run(args: argparse.Namespace) -> None:
             if previous_token_at is not None:
                 intervals.append(now - previous_token_at)
             previous_token_at = now
-            output_parts.append(token)
+            if chunk.reasoning:
+                reasoning_parts.append(chunk.reasoning)
+            if chunk.content:
+                output_parts.append(chunk.content)
             sample = monitor.sample()
             samples.append(sample)
             speed = (1 / intervals[-1]) if intervals and intervals[-1] > 0 else 0.0
             live.update(live_dashboard(
                 ref.name, args.engine, args.gpus, context_1, context_2,
-                "".join(output_parts), sample, first_token_at - started, speed,
+                "".join(reasoning_parts), "".join(output_parts), args.thinking,
+                sample, first_token_at - started, speed,
             ))
     finished = time.perf_counter()
+    reasoning = "".join(reasoning_parts)
     output = "".join(output_parts)
     final_sample = samples[-1]
     ttft = (first_token_at - started) if first_token_at else finished - started
     averages = aggregate_samples(samples)
     console.print(final_summary(ttft, intervals, final_sample, averages))
-    output_tokens = token_count(args.engine, model, output)
+    reasoning_tokens = token_count(args.engine, model, reasoning)
+    response_tokens = token_count(args.engine, model, output)
+    output_tokens = reasoning_tokens + response_tokens
+    output_words = len(reasoning.split()) + len(output.split())
     record = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "model_name": ref.name,
@@ -136,8 +172,15 @@ def command_run(args: argparse.Namespace) -> None:
         "prompt_text": args.prompt,
         "prompt_length_words": len(args.prompt.split()),
         "prompt_length_tokens": prompt_tokens,
+        "thinking_enabled": args.thinking,
+        "reasoning": reasoning,
+        "reasoning_length_words": len(reasoning.split()),
+        "reasoning_length_tokens": reasoning_tokens,
         "output": output,
-        "output_length_words": len(output.split()),
+        "response_length_words": len(output.split()),
+        "response_length_tokens": response_tokens,
+        "generated_text": reasoning + output,
+        "output_length_words": output_words,
         "output_length_tokens": output_tokens,
         "time_to_first_token_seconds": ttft,
         "time_to_first_token_ms": ttft * 1000,
@@ -166,9 +209,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--temperature", type=float, default=0.7)
     run.add_argument(
         "--thinking",
-        action="store_true",
-        help="Enable reasoning mode for models such as Qwen3 (disabled by default)",
+        nargs="?",
+        const=True,
+        default=False,
+        type=parse_bool,
+        metavar="{true,false}",
+        help="Enable reasoning mode; accepts true/false (default: false)",
     )
+    run.add_argument("--no-thinking", dest="thinking", action="store_false", help=argparse.SUPPRESS)
     run.add_argument("--filename", help="GGUF filename when model is an owner/repository ID")
     run.add_argument("--prompt", required=True)
     subparsers.add_parser("status", help="Show the persistent server state")
@@ -177,7 +225,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    args = build_parser().parse_args(normalize_cli_args(sys.argv[1:]))
     if args.command == "setup":
         setup_engine(args.engine)
     elif args.command == "run":

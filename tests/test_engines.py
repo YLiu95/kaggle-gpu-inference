@@ -49,7 +49,9 @@ def test_stream_completion_sends_requested_model(monkeypatch) -> None:
         ])
 
     monkeypatch.setattr(engines.urllib.request, "urlopen", fake_open)
-    assert list(engines.stream_completion("owner/model", "prompt", 4, 0.1)) == ["OK"]
+    assert list(engines.stream_completion("owner/model", "prompt", 4, 0.1)) == [
+        engines.StreamChunk(content="OK")
+    ]
     assert captured["model"] == "owner/model"
     assert captured["chat_template_kwargs"] == {"enable_thinking": False}
 
@@ -65,8 +67,23 @@ def test_stream_completion_accepts_reasoning_content(monkeypatch) -> None:
         ])
 
     monkeypatch.setattr(engines.urllib.request, "urlopen", fake_open)
-    assert list(engines.stream_completion("owner/model", "prompt", 4, 0.1, thinking=True)) == ["Think"]
+    assert list(engines.stream_completion("owner/model", "prompt", 4, 0.1, thinking=True)) == [
+        engines.StreamChunk(reasoning="Think")
+    ]
     assert captured["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_stream_completion_keeps_mixed_delta_as_one_event(monkeypatch) -> None:
+    def fake_open(request, timeout):
+        return FakeResponse([
+            b'data: {"choices":[{"delta":{"reasoning_content":"Think","content":"Answer"}}]}\n',
+            b'data: [DONE]\n',
+        ])
+
+    monkeypatch.setattr(engines.urllib.request, "urlopen", fake_open)
+    assert list(engines.stream_completion("owner/model", "prompt", 4, 0.1, thinking=True)) == [
+        engines.StreamChunk(reasoning="Think", content="Answer")
+    ]
 
 
 def test_token_count_uses_engine_specific_schema(monkeypatch) -> None:

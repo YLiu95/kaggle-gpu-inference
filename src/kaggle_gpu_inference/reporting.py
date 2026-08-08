@@ -32,7 +32,9 @@ def live_dashboard(
     gpus: int,
     context_1: int,
     context_2: int,
+    reasoning: str,
     output: str,
+    show_reasoning: bool,
     sample: Sample,
     ttft: float | None,
     token_speed: float,
@@ -51,11 +53,14 @@ def live_dashboard(
         _metric("CPU", f"{sample.cpu_percent:.1f}% @ {sample.cpu_speed_ghz:.2f} GHz"),
         _metric("CPU RAM", f"{sample.ram_used_gb:.2f}/{sample.ram_total_gb:.2f} GB ({sample.ram_percent:.1f}%)"),
     ], equal=True, expand=True)
-    stream = Text(output or "Waiting for first token...", overflow="fold")
-    return Group(
-        Panel(top, title="Inference", border_style="cyan"),
-        Panel(stream, title="Streaming tokens", border_style="green"),
-    )
+    panels = [Panel(top, title="Inference", border_style="cyan")]
+    if show_reasoning:
+        reasoning_stream = Text(reasoning or "Waiting for reasoning tokens...", overflow="fold")
+        panels.append(Panel(reasoning_stream, title="Reasoning tokens", border_style="yellow"))
+    response_stream = Text(output or "Waiting for response tokens...", overflow="fold")
+    response_title = "Response tokens" if show_reasoning else "Streaming tokens"
+    panels.append(Panel(response_stream, title=response_title, border_style="green"))
+    return Group(*panels)
 
 
 def final_summary(ttft: float, token_intervals: list[float], sample: Sample, averages: dict[str, float]) -> Panel:

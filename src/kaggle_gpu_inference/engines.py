@@ -8,6 +8,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -17,6 +18,12 @@ from .config import HOME, PORT, RUNTIME_DIR, STATE_FILE, ensure_dirs, hf_token, 
 
 
 ENGINE_NAMES = ("llama.cpp", "vllm", "sglang")
+
+
+@dataclass(frozen=True)
+class StreamChunk:
+    reasoning: str = ""
+    content: str = ""
 
 
 def _server_command(engine: str, model: str, gpus: int, context: int) -> list[str]:
@@ -157,7 +164,7 @@ def stream_completion(
     max_tokens: int,
     temperature: float,
     thinking: bool = False,
-) -> Iterator[str]:
+) -> Iterator[StreamChunk]:
     payload = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -181,9 +188,10 @@ def stream_completion(
             choices = event.get("choices", [])
             if choices:
                 delta = choices[0].get("delta", {})
-                token = delta.get("content") or delta.get("reasoning_content")
-                if token:
-                    yield token
+                reasoning = delta.get("reasoning_content") or ""
+                content = delta.get("content") or ""
+                if reasoning or content:
+                    yield StreamChunk(reasoning=reasoning, content=content)
 
 
 def token_count(engine: str, model: str, text: str) -> int:

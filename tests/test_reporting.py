@@ -26,9 +26,14 @@ def test_stream_panel_preserves_long_output() -> None:
     output = "\n".join(f"generated-line-{index:02d}" for index in range(30))
     console = Console(record=True, width=100, height=60)
 
-    console.print(reporting.live_dashboard("model", "llama.cpp", 1, 4096, 8192, output, sample, 0.1, 20))
+    console.print(reporting.live_dashboard(
+        "model", "llama.cpp", 1, 4096, 8192, "reasoning", output, True, sample, 0.1, 20
+    ))
 
     rendered = console.export_text()
+    assert "Reasoning tokens" in rendered
+    assert "Response tokens" in rendered
+    assert "reasoning" in rendered
     assert "generated-line-00" in rendered
     assert "generated-line-29" in rendered
 
