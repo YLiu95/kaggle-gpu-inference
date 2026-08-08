@@ -151,13 +151,20 @@ def ensure_server(engine: str, model: str, source: str, gpus: int, context: int)
     raise TimeoutError(f"{engine} server did not become ready within 10 minutes; see {log_path}")
 
 
-def stream_completion(model: str, prompt: str, max_tokens: int, temperature: float) -> Iterator[str]:
+def stream_completion(
+    model: str,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    thinking: bool = False,
+) -> Iterator[str]:
     payload = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": True,
+        "chat_template_kwargs": {"enable_thinking": thinking},
     }).encode()
     request = urllib.request.Request(
         f"http://127.0.0.1:{PORT}/v1/chat/completions",
@@ -173,7 +180,8 @@ def stream_completion(model: str, prompt: str, max_tokens: int, temperature: flo
             event = json.loads(line[6:])
             choices = event.get("choices", [])
             if choices:
-                token = choices[0].get("delta", {}).get("content")
+                delta = choices[0].get("delta", {})
+                token = delta.get("content") or delta.get("reasoning_content")
                 if token:
                     yield token
 

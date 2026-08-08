@@ -94,7 +94,9 @@ def command_run(args: argparse.Namespace) -> None:
     samples = [initial]
     with Live(console=console, refresh_per_second=4, transient=False) as live:
         live.update(live_dashboard(ref.name, args.engine, args.gpus, context_1, context_2, "", initial, None, 0.0))
-        for token in stream_completion(model, args.prompt, args.max_tokens, args.temperature):
+        for token in stream_completion(
+            model, args.prompt, args.max_tokens, args.temperature, thinking=args.thinking
+        ):
             now = time.perf_counter()
             if first_token_at is None:
                 first_token_at = now
@@ -157,6 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--context", type=int, default=4096)
     run.add_argument("--max-tokens", type=int, default=256)
     run.add_argument("--temperature", type=float, default=0.7)
+    run.add_argument(
+        "--thinking",
+        action="store_true",
+        help="Enable reasoning mode for models such as Qwen3 (disabled by default)",
+    )
     run.add_argument("--filename", help="GGUF filename when model is an owner/repository ID")
     run.add_argument("--prompt", required=True)
     subparsers.add_parser("status", help="Show the persistent server state")

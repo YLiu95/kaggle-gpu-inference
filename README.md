@@ -49,6 +49,8 @@ Run another prompt with the same settings to reuse the model already in VRAM:
 !kgpu run "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/main/Qwen3.6-35B-A3B-UD-IQ1_M.gguf" --engine llama.cpp --gpus 2 --context 4096 --prompt "Now give a concrete example."
 ```
 
+Thinking mode is disabled by default so Qwen3-family models return an answer within the output budget. Add `--thinking` to stream their reasoning tokens as well as the final answer; increase `--max-tokens` because reasoning consumes that same budget.
+
 Use one GPU with `--gpus 1`. The second GPU remains available, but the model must fit in approximately 90% of one T4's VRAM.
 
 ## vLLM And SGLang
